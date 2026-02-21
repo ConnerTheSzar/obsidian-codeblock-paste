@@ -20,3 +20,9 @@ data.json
 
 # Exclude macOS Finder (System Explorer) View States
 .DS_Store
+
+# Legacy archived code from original fork
+_legacy_src/
+
+# Local Development Vault
+TestVault/

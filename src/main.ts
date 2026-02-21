@@ -1,99 +1,135 @@
-import {App, Editor, MarkdownView, Modal, Notice, Plugin} from 'obsidian';
-import {DEFAULT_SETTINGS, MyPluginSettings, SampleSettingTab} from "./settings";
+import { Editor, MarkdownView, Notice, Plugin } from "obsidian";
+import { CodeBlockPasteSettings, CodeBlockPasteSettingTab, DEFAULT_SETTINGS } from "./settings";
 
-// Remember to rename these classes and interfaces!
+// We use the "common" subset (~30 languages) to keep bundle size small
+import hljs from "highlight.js/lib/common";
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+export default class CodeBlockPaste extends Plugin {
+	settings: CodeBlockPasteSettings;
 
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		this.addRibbonIcon('dice', 'Sample', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status bar text');
-
-		// This adds a simple command that can be triggered anywhere
+		// ── Command: Paste as Code Block ────────────────────────────
+		// Reads clipboard text, detects language, pastes as fenced code block.
 		this.addCommand({
-			id: 'open-modal-simple',
-			name: 'Open modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'replace-selected',
-			name: 'Replace selected content',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				editor.replaceSelection('Sample editor command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-modal-complex',
-			name: 'Open modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
+			id: "paste-as-code-block",
+			name: "Paste as code block",
+			editorCallback: async (editor: Editor) => {
+				try {
+					const clipboardText = await navigator.clipboard.readText();
+					if (!clipboardText) {
+						new Notice("Clipboard is empty or contains non-text data.");
+						return;
 					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
+					const language = this.detectLanguage(clipboardText);
+					const codeBlock = this.wrapInCodeBlock(clipboardText, language);
+					editor.replaceSelection(codeBlock);
+				} catch (err) {
+					console.error("Code Block Paste: clipboard error", err);
+					new Notice("Could not read clipboard.");
 				}
-				return false;
-			}
+			},
 		});
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			new Notice("Click");
+		// ── Command: Wrap Selection as Code Block ───────────────────
+		// Takes highlighted text, detects language, replaces with fenced code block.
+		this.addCommand({
+			id: "wrap-selection-as-code-block",
+			name: "Wrap selection as code block",
+			editorCallback: (editor: Editor) => {
+				const selection = editor.getSelection();
+				if (!selection) {
+					// Nothing selected — insert an empty code block and place cursor inside
+					const cursor = editor.getCursor();
+					editor.replaceRange("```\n\n```\n", cursor);
+					editor.setCursor({ line: cursor.line + 1, ch: 0 });
+					return;
+				}
+				const language = this.detectLanguage(selection);
+				editor.replaceSelection(this.wrapInCodeBlock(selection, language));
+			},
 		});
 
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+		// ── Right-Click Context Menu ────────────────────────────────
+		this.registerEvent(
+			this.app.workspace.on("editor-menu", (menu, editor) => {
+				menu.addItem((item) => {
+					item.setTitle("Paste as code block")
+						.setIcon("code")
+						.onClick(async () => {
+							try {
+								const clipboardText = await navigator.clipboard.readText();
+								if (!clipboardText) {
+									new Notice("Clipboard is empty or contains non-text data.");
+									return;
+								}
+								const language = this.detectLanguage(clipboardText);
+								editor.replaceSelection(this.wrapInCodeBlock(clipboardText, language));
+							} catch (err) {
+								console.error("Code Block Paste: clipboard error", err);
+								new Notice("Could not read clipboard.");
+							}
+						});
+				});
+			})
+		);
 
+		// ── Settings Tab ────────────────────────────────────────────
+		this.addSettingTab(new CodeBlockPasteSettingTab(this.app, this));
 	}
 
 	onunload() {
+		// Obsidian automatically cleans up commands, events, and settings tabs.
 	}
 
+	// ── Core Logic ──────────────────────────────────────────────────
+
+	/**
+	 * Detect the programming language of a text snippet.
+	 * Returns the detected language tag or the configured fallback.
+	 */
+	detectLanguage(text: string): string {
+		const subset = this.settings.enabledLanguages.length > 0
+			? this.settings.enabledLanguages
+			: undefined; // undefined = use all registered languages
+
+		const result = hljs.highlightAuto(text, subset);
+
+		if (result.relevance < this.settings.confidenceThreshold) {
+			return this.settings.fallbackLanguage;
+		}
+
+		return result.language ?? this.settings.fallbackLanguage;
+	}
+
+	/**
+	 * Wrap text in a Markdown fenced code block.
+	 */
+	wrapInCodeBlock(text: string, language: string): string {
+		return `\`\`\`${language}\n${text}\n\`\`\`\n`;
+	}
+
+	/**
+	 * Get the full list of languages registered with highlight.js.
+	 */
+	getAllLanguages(): string[] {
+		return hljs.listLanguages();
+	}
+
+	// ── Settings Persistence ────────────────────────────────────────
+
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<MyPluginSettings>);
+		const saved = await this.loadData() as Partial<CodeBlockPasteSettings> | null;
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
+
+		// First-time setup: enable all common languages by default
+		if (this.settings.enabledLanguages.length === 0) {
+			this.settings.enabledLanguages = hljs.listLanguages();
+		}
 	}
 
 	async saveSettings() {
 		await this.saveData(this.settings);
-	}
-}
-
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
-
-	onOpen() {
-		let {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
 	}
 }
