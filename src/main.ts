@@ -22,6 +22,11 @@ export default class CodeBlockPaste extends Plugin {
 						new Notice("Clipboard is empty or contains non-text data.");
 						return;
 					}
+					if (this.isInsideCodeBlock(editor)) {
+						editor.replaceSelection(clipboardText.trim());
+						new Notice("Pasted raw text (already inside a code block).");
+						return;
+					}
 					const language = this.detectLanguage(clipboardText);
 					const codeBlock = this.wrapInCodeBlock(clipboardText, language);
 					editor.replaceSelection(codeBlock);
@@ -38,9 +43,12 @@ export default class CodeBlockPaste extends Plugin {
 			id: "wrap-selection-as-code-block",
 			name: "Wrap selection as code block",
 			editorCallback: (editor: Editor) => {
+				if (this.isInsideCodeBlock(editor)) {
+					new Notice("Already inside a code block.");
+					return;
+				}
 				const selection = editor.getSelection();
 				if (!selection) {
-					// Nothing selected — insert an empty code block and place cursor inside
 					const cursor = editor.getCursor();
 					editor.replaceRange("```\n\n```\n", cursor);
 					editor.setCursor({ line: cursor.line + 1, ch: 0 });
@@ -64,6 +72,11 @@ export default class CodeBlockPaste extends Plugin {
 									new Notice("Clipboard is empty or contains non-text data.");
 									return;
 								}
+								if (this.isInsideCodeBlock(editor)) {
+									editor.replaceSelection(clipboardText.trim());
+									new Notice("Pasted raw text (already inside a code block).");
+									return;
+								}
 								const language = this.detectLanguage(clipboardText);
 								editor.replaceSelection(this.wrapInCodeBlock(clipboardText, language));
 							} catch (err) {
@@ -82,6 +95,26 @@ export default class CodeBlockPaste extends Plugin {
 	onunload() {
 		// Obsidian automatically cleans up commands, events, and settings tabs.
 	}
+	// ── Helpers ─────────────────────────────────────────────────────
+
+	/**
+	 * Check if the cursor is currently inside a fenced code block.
+	 * Scans upward from the cursor, counting opening/closing fences.
+	 */
+	isInsideCodeBlock(editor: Editor): boolean {
+		const cursor = editor.getCursor();
+		let fenceCount = 0;
+
+		for (let i = 0; i <= cursor.line; i++) {
+			const line = editor.getLine(i).trim();
+			if (line.match(/^`{3,}/)) {
+				fenceCount++;
+			}
+		}
+
+		// Odd count = we're inside an open fence
+		return fenceCount % 2 === 1;
+	}
 
 	// ── Core Logic ──────────────────────────────────────────────────
 
@@ -90,11 +123,12 @@ export default class CodeBlockPaste extends Plugin {
 	 * Returns the detected language tag or the configured fallback.
 	 */
 	detectLanguage(text: string): string {
-		const subset = this.settings.enabledLanguages.length > 0
-			? this.settings.enabledLanguages
-			: undefined; // undefined = use all registered languages
+		// If no languages enabled, skip detection entirely
+		if (this.settings.enabledLanguages.length === 0) {
+			return this.settings.fallbackLanguage;
+		}
 
-		const result = hljs.highlightAuto(text, subset);
+		const result = hljs.highlightAuto(text, this.settings.enabledLanguages);
 
 		if (result.relevance < this.settings.confidenceThreshold) {
 			return this.settings.fallbackLanguage;
@@ -107,7 +141,19 @@ export default class CodeBlockPaste extends Plugin {
 	 * Wrap text in a Markdown fenced code block.
 	 */
 	wrapInCodeBlock(text: string, language: string): string {
-		return `\`\`\`${language}\n${text}\n\`\`\`\n`;
+		const trimmed = text.trim();
+
+		// Find the longest consecutive run of backticks in the text
+		const backtickRuns = trimmed.match(/`+/g);
+		const maxRun = backtickRuns
+			? Math.max(...backtickRuns.map(r => r.length))
+			: 0;
+
+		// Use at least 3 backticks, or one more than the longest run found
+		const fenceLength = Math.max(3, maxRun + 1);
+		const fence = "`".repeat(fenceLength);
+
+		return `${fence}${language}\n${trimmed}\n${fence}\n`;
 	}
 
 	/**
